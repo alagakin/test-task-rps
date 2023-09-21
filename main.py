@@ -1,34 +1,37 @@
+import asyncio
 import time
 from typing import List
 
 
 class Client:
-    __queue: List[str]
-    __queries_count: int = 0
-    __rps: int = 0
-    MAX_RPS = 100
-
-    def __init__(self, queue: list):
+    def __init__(self, queue: List[str], max_rps: int = 100):
         self.__queue = queue
+        self.__max_rps = max_rps
+        self.__queries_count = 0
+        self.__last_request_time = 0
 
-    def send(self, item: str):
+    async def send(self, item: str) -> bool:
         self.__queries_count += 1
+        # in case of success request:
+        return True
 
-    def send_queue(self):
-        start = time.perf_counter()
+    async def send_queue(self):
         for item in self.__queue:
-            if self.can_send_request(start):
-                self.send(item)
+            if await self.send(item):
+                await self.limit_rps()
 
-    def can_send_request(self, start):
-        now = time.perf_counter()
-        if self.__queries_count / (now - start) > self.MAX_RPS:
-            time.sleep(1)
-            return self.can_send_request(start)
-        else:
-            return True
+    async def limit_rps(self):
+        current_time = time.perf_counter()
+        time_elapsed = current_time - self.__last_request_time
+        if time_elapsed < 1 / self.__max_rps:
+            await asyncio.sleep(1 / self.__max_rps - time_elapsed)
+        self.__last_request_time = time.perf_counter()
 
 
 if __name__ == "__main__":
-    client = Client([str(i) for i in range(200)])
-    client.send_queue()
+    loop = asyncio.get_event_loop()
+    client = Client([f'{i}' for i in range(200)], max_rps=100)
+    try:
+        loop.run_until_complete(client.send_queue())
+    finally:
+        print('close')
