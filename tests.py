@@ -1,23 +1,73 @@
 import pytest
-import asyncio
+
+from typing import List, Type
 from main import Client
+from main import Server
+from limiters import SlidingWindowCount, SlidingWindowLog, RequestsLimiter
 
 
-@pytest.mark.parametrize("max_rps", [1000, 80, 90, 5])
-def test_rps_limit(max_rps):
-    queue = [str(i) for i in range(100)]
-    client = Client(queue, max_rps=max_rps)
+@pytest.mark.parametrize("limiter, max_capacity, rate, queue_length", [
+    (SlidingWindowCount, 5, 0.2, 30),
+    (SlidingWindowCount, 20, 0.01, 300),
+    (SlidingWindowCount, 100, 1, 300),
+    (SlidingWindowLog, 5, 0.2, 30),
+    (SlidingWindowLog, 20, 0.01, 300),
+    (SlidingWindowLog, 100, 1, 300),
 
-    loop = asyncio.get_event_loop()
-    start_time = loop.time()
+])
+def test_rate_does_not_exceed(limiter: Type[RequestsLimiter], max_capacity: int, rate: float, queue_length: int):
+    limit_strategy = limiter(max_capacity, rate)
+    server = Server(acceptance_rate=90)
+    test_queue = [f"{i}" for i in range(queue_length)]
+    client = Client(queue=test_queue, server=server, limit_strategy=limit_strategy)
 
-    async def send_and_measure_time():
-        await client.send_queue()
-        elapsed = loop.time() - start_time
-        return elapsed
+    while True:
+        try:
+            client.send_next()
+        except StopIteration:
+            break
 
-    elapsed_time = loop.run_until_complete(send_and_measure_time())
-    rps = len(queue) / elapsed_time
+    history = server.get_history()
+    tolerance_rate = 0.1
+    min_difference = find_min_difference(history, max_capacity)
+    assert min_difference > (rate - rate * tolerance_rate)
 
-    tolerance = 1
-    assert rps <= max_rps + tolerance
+
+def find_min_difference(history: List[tuple], step: int):
+    differences = []
+    for i in range(0, len(history), step):
+        if i + step < len(history):
+            difference = history[i + step][0] - history[i][0]
+            differences.append(difference)
+
+    return min(differences)
+
+
+@pytest.mark.parametrize("queue_length", [1, 100, 1000, 10000])
+def test_server_received_all_items(queue_length: int):
+    limiter = SlidingWindowCount(10000, 1)
+    server = Server(acceptance_rate=80)
+    test_queue = [f"{i}" for i in range(queue_length)]
+    client = Client(queue=test_queue, server=server, limit_strategy=limiter)
+
+    while True:
+        try:
+            client.send_next()
+        except StopIteration:
+            break
+
+    received_items = [item[1] for item in server.get_history()]
+    assert test_queue == received_items
+
+
+@pytest.mark.parametrize("rate", [rate for rate in range(10, 101, 10)])
+def test_server_acceptance_rate(rate: int):
+    server = Server(acceptance_rate=rate)
+    iterations_count = 100_000
+    accepted_count = 0
+    for i in range(iterations_count):
+        if server.receive("test_item"):
+            accepted_count += 1
+
+    tolerance = 0.01
+    assert abs(accepted_count - rate / 100 * iterations_count) < tolerance * iterations_count

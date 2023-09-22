@@ -1,37 +1,50 @@
-import asyncio
-import time
+import random
+
+from collections import deque
 from typing import List
+from time import time
+
+from limiters import RequestsLimiter
+
+
+class Server:
+    def __init__(self, acceptance_rate: int = 100) -> None:
+        self.__history = []
+        if acceptance_rate <= 0 or acceptance_rate > 100:
+            raise ValueError("Acceptance rate must be between 0 and 100")
+        self.__acceptance_rate = acceptance_rate
+
+    def receive(self, item: str) -> bool:
+        if self.__can_accept():
+            self.__history.append((time(), item))
+            return True
+        else:
+            return False
+
+    def get_history(self) -> List[tuple]:
+        return self.__history
+
+    def __can_accept(self) -> bool:
+        if random.randint(1, 100) > self.__acceptance_rate:
+            return False
+        return True
 
 
 class Client:
-    def __init__(self, queue: List[str], max_rps: int = 100):
-        self.__queue = queue
-        self.__max_rps = max_rps
-        self.__queries_count = 0
-        self.__last_request_time = 0
+    def __init__(self, queue: List[str], server: Server, limit_strategy: RequestsLimiter) -> None:
+        self.__queue = deque()
+        self.__queue.extend(queue)
+        self.__server = server
+        self.__strategy = limit_strategy
 
-    async def send(self, item: str) -> bool:
-        self.__queries_count += 1
-        # in case of success request:
-        return True
+    def send_next(self) -> bool:
+        if len(self.__queue) == 0:
+            raise StopIteration('The queue is empty')
 
-    async def send_queue(self):
-        for item in self.__queue:
-            if await self.send(item):
-                await self.limit_rps()
+        if self.__strategy.can_proceed():
+            result = self.__server.receive(self.__queue[0])
+            if result:
+                self.__queue.popleft()
+                return True
 
-    async def limit_rps(self):
-        current_time = time.perf_counter()
-        time_elapsed = current_time - self.__last_request_time
-        if time_elapsed < 1 / self.__max_rps:
-            await asyncio.sleep(1 / self.__max_rps - time_elapsed)
-        self.__last_request_time = time.perf_counter()
-
-
-if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    client = Client([f'{i}' for i in range(200)], max_rps=100)
-    try:
-        loop.run_until_complete(client.send_queue())
-    finally:
-        print('close')
+        return False
